@@ -53,7 +53,7 @@ kbd{background:#252f3b;border:1px solid #3b4654;border-radius:5px;padding:2px 5p
 <body>
 <header>
   <div class="brand"><div class="mark">N</div><span class="title">Nexautia · Teleprompter inteligente</span></div>
-  <span class="small">V1 · prueba de seguimiento por voz</span>
+  <span class="small">V1.1 · seguimiento tolerante por voz</span>
 </header>
 
 <main id="editor">
@@ -68,7 +68,7 @@ Lo importante no es utilizar inteligencia artificial porque esté de moda. Lo im
     <button class="primary" id="start">Iniciar teleprompter</button>
     <span class="note" id="support"></span>
   </div>
-  <div class="note">Esta V1 usa el reconocimiento de voz disponible en el navegador para validar el funcionamiento. Chrome/Edge suelen ofrecer el mejor soporte. El navegador puede implementar este reconocimiento mediante servicios externos, por lo que esta V1 todavía no garantiza procesamiento 100 % local.</div>
+  <div class="note">Esta V1.1 mantiene el comportamiento visual de la V1 y solo hace más tolerante el emparejamiento de la voz con el guion. Chrome/Edge suelen ofrecer el mejor soporte. El navegador puede implementar este reconocimiento mediante servicios externos, por lo que esta V1 todavía no garantiza procesamiento 100 % local.</div>
 </main>
 
 <section id="promptView">
@@ -125,37 +125,71 @@ function paint(){
     reader.scrollTo({top:Math.max(0,target),behavior:'smooth'});
   }
 }
+function similarWord(a,b){
+  if(!a || !b) return 0;
+  if(a===b) return 1;
+  if(a.length>=5 && b.length>=5){
+    if(a.startsWith(b) || b.startsWith(a)) return .88;
+    if(Math.abs(a.length-b.length)<=1){
+      let i=0,j=0,d=0;
+      while(i<a.length && j<b.length){
+        if(a[i]===b[j]){i++;j++;continue;}
+        if(++d>1) return 0;
+        if(a.length>b.length)i++;
+        else if(b.length>a.length)j++;
+        else{i++;j++;}
+      }
+      d+=(a.length-i)+(b.length-j);
+      if(d<=1) return .78;
+    }
+  }
+  return 0;
+}
 function scoreAt(words,startIndex){
-  let score=0, matched=0, j=startIndex;
+  let score=0,matched=0,exact=0,j=startIndex,last=startIndex;
   for(let k=0;k<words.length && j<tokens.length;k++){
     if(!words[k]) continue;
-    let found=-1;
-    for(let look=j;look<Math.min(tokens.length,j+4);look++){
-      if(tokens[look].n===words[k]){found=look;break;}
+    let found=-1,quality=0;
+    for(let look=j;look<Math.min(tokens.length,j+7);look++){
+      const q=similarWord(tokens[look].n,words[k]);
+      if(q>quality){found=look;quality=q;if(q===1)break;}
     }
-    if(found>=0){ score += 3-(found-j)*.45; matched++; j=found+1; }
-    else score-=.7;
+    if(found>=0 && quality>=.75){
+      const gap=found-j;
+      score+=(quality===1?3.2:2.35)-gap*.32;
+      matched++; if(quality===1) exact++;
+      last=found;j=found+1;
+    }else score-=.55;
   }
-  return {score,matched,end:j};
+  return {score,matched,exact,end:last+1,start:startIndex};
 }
+let pendingCandidate=null;
 function follow(transcript){
   const words=norm(transcript).split(/\s+/).filter(Boolean);
   if(!words.length) return;
   heard.textContent='Oyendo: '+transcript;
-  const lo=Math.max(0,pos-12), hi=Math.min(tokens.length-1,pos+45);
-  let best={score:-999,matched:0,end:pos};
+  const lo=Math.max(0,pos-4),hi=Math.min(tokens.length-1,pos+75);
+  let best={score:-999,matched:0,exact:0,end:pos,start:pos};
   for(let i=lo;i<=hi;i++){
     const r=scoreAt(words,i);
-    // favorece ligeramente posiciones próximas a la actual
-    r.score -= Math.abs(i-pos)*.025;
+    r.score-=Math.max(0,i-pos)*.018;
     if(r.score>best.score) best=r;
   }
-  const needed = words.length<=2 ? words.length : Math.max(2,Math.ceil(words.length*.45));
-  if(best.matched>=needed && best.score>1.2){
-    // No retroceder por reconocimientos parciales salvo una corrección mínima
-    const newPos=Math.max(pos-2,best.end);
-    if(newPos>pos){ pos=Math.min(newPos,tokens.length-1); paint(); }
+  const needed=words.length<=2?words.length:Math.max(2,Math.ceil(words.length*.38));
+  const strong=best.matched>=needed && best.score>1.35 && (best.exact>=1 || best.matched>=3);
+  if(!strong) return;
+  const candidate=Math.min(best.end,tokens.length-1);
+  const jump=candidate-pos;
+  if(jump<=14){
+    if(candidate>pos){pos=candidate;paint();}
+    pendingCandidate=null;
+    return;
   }
+  if(pendingCandidate && Math.abs(pendingCandidate.pos-candidate)<=5){
+    const confirmed=Math.max(pendingCandidate.pos,candidate);
+    if(confirmed>pos){pos=confirmed;paint();}
+    pendingCandidate=null;
+  }else pendingCandidate={pos:candidate};
 }
 function setupRecognition(){
   if(!SR) return;
