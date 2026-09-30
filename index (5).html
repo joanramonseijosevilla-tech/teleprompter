@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Teleprompter inteligente — Nexautia</title>
+<meta name="description" content="Teleprompter inteligente que sigue tu lectura mediante la voz.">
+<style>
+:root{
+  --bg:#10151d;--panel:#171e28;--panel2:#202936;--text:#f2f5f8;
+  --muted:#9eabba;--accent:#67d7c4;--line:#303b49;--danger:#ff8585;
+  --fs:42px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+button,textarea,input{font:inherit}
+button{border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:10px;padding:10px 14px;cursor:pointer}
+button:hover{filter:brightness(1.12)}
+button.primary{background:var(--accent);color:#08110f;border-color:transparent;font-weight:700}
+button:disabled{opacity:.45;cursor:not-allowed}
+header{height:58px;display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-bottom:1px solid var(--line);background:#121923}
+.brand{display:flex;align-items:center;gap:9px;font-weight:750}
+.mark{width:29px;height:29px;border-radius:9px;background:var(--accent);display:grid;place-items:center;color:#08110f;font-weight:900}
+.small{font-size:13px;color:var(--muted)}
+main{max-width:1050px;margin:auto;padding:18px}
+#editor{display:grid;gap:12px}
+textarea{width:100%;min-height:48vh;resize:vertical;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:14px;padding:16px;line-height:1.55;outline:none}
+textarea:focus{border-color:var(--accent)}
+.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+.note{color:var(--muted);font-size:13px;line-height:1.45}
+#promptView{display:none;position:fixed;inset:0;background:var(--bg);z-index:10}
+#promptView.active{display:flex;flex-direction:column}
+.toolbar{min-height:54px;padding:7px 10px;display:flex;gap:7px;align-items:center;border-bottom:1px solid var(--line);background:#121923;flex-wrap:wrap}
+.spacer{flex:1}
+.status{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:13px}
+.dot{width:9px;height:9px;border-radius:50%;background:#687383}
+.dot.live{background:var(--accent);box-shadow:0 0 0 4px #67d7c422}
+.readerWrap{position:relative;flex:1;overflow:hidden}
+.guide{position:absolute;left:0;right:0;top:34%;height:1.75em;background:#67d7c40b;border-top:1px solid #67d7c455;border-bottom:1px solid #67d7c455;pointer-events:none;z-index:2}
+.guide:before{content:"";position:absolute;left:8px;top:50%;width:8px;height:8px;border-left:2px solid var(--accent);border-bottom:2px solid var(--accent);transform:translateY(-50%) rotate(45deg)}
+#reader{height:100%;overflow:auto;scroll-behavior:smooth;padding:34vh 8vw 55vh;font-size:var(--fs);line-height:1.55;font-weight:600}
+.word{color:#8793a1;transition:color .12s,background .12s}
+.word.done{color:#c8d0d9}
+.word.current{color:#fff;background:#67d7c426;border-radius:.18em;box-shadow:0 0 0 .08em #67d7c422}
+#heard{position:absolute;right:12px;bottom:10px;max-width:min(75%,700px);padding:6px 10px;border-radius:8px;background:#0b1017cc;color:#aeb9c6;font-size:12px;z-index:4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+kbd{background:#252f3b;border:1px solid #3b4654;border-radius:5px;padding:2px 5px}
+@media(max-width:600px){
+ main{padding:12px}.brand .title{display:none}.toolbar button{padding:8px 10px}
+ #reader{padding-left:7vw;padding-right:7vw}.small.hideNarrow{display:none}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><div class="mark">N</div><span class="title">Nexautia · Teleprompter inteligente</span></div>
+  <span class="small">V1 · prueba de seguimiento por voz</span>
+</header>
+
+<main id="editor">
+  <div>
+    <h1 style="margin:4px 0 6px;font-size:clamp(25px,4vw,38px)">Teleprompter inteligente</h1>
+    <div class="note">Pega el guion. Al iniciar, el teleprompter intentará localizar en el texto las palabras que vas diciendo y mantendrá tu posición en la zona de lectura.</div>
+  </div>
+  <textarea id="script" spellcheck="true" placeholder="Pega o escribe aquí tu guion...">Hoy quiero hablaros de algo que está cambiando la forma en que trabajamos. La inteligencia artificial no consiste solamente en hacer preguntas a una máquina. Bien utilizada puede ayudarnos a ahorrar tiempo, automatizar tareas repetitivas y trabajar de una forma mucho más sencilla.
+
+Lo importante no es utilizar inteligencia artificial porque esté de moda. Lo importante es encontrar aquellos procesos donde realmente nos puede ayudar.</textarea>
+  <div class="row">
+    <button class="primary" id="start">Iniciar teleprompter</button>
+    <span class="note" id="support"></span>
+  </div>
+  <div class="note">Esta V1 usa el reconocimiento de voz disponible en el navegador para validar el funcionamiento. Chrome/Edge suelen ofrecer el mejor soporte. El navegador puede implementar este reconocimiento mediante servicios externos, por lo que esta V1 todavía no garantiza procesamiento 100 % local.</div>
+</main>
+
+<section id="promptView">
+  <div class="toolbar">
+    <button id="back">← Guion</button>
+    <button id="toggle" class="primary">Iniciar voz</button>
+    <button id="minus" title="Reducir texto">A−</button>
+    <button id="plus" title="Aumentar texto">A+</button>
+    <button id="rewind" title="Retroceder unas palabras">↶</button>
+    <div class="spacer"></div>
+    <div class="status"><span class="dot" id="dot"></span><span id="state">Preparado</span></div>
+  </div>
+  <div class="readerWrap">
+    <div class="guide"></div>
+    <div id="reader"></div>
+    <div id="heard">Micrófono detenido</div>
+  </div>
+</section>
+
+<script>
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const $ = s => document.querySelector(s);
+const script = $('#script'), reader=$('#reader'), view=$('#promptView');
+const start=$('#start'), toggle=$('#toggle'), dot=$('#dot'), state=$('#state'), heard=$('#heard');
+let rec=null, listening=false, tokens=[], pos=0, fontSize=42, manualStop=false;
+
+function norm(s){
+  return s.toLocaleLowerCase('es-ES')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^\p{L}\p{N}]+/gu,' ').trim();
+}
+function build(){
+  const text=script.value.trim();
+  if(!text) return false;
+  tokens=[];
+  reader.innerHTML='';
+  const parts=text.match(/\S+\s*/g)||[];
+  parts.forEach((raw,i)=>{
+    const sp=document.createElement('span');
+    sp.className='word'; sp.dataset.i=i; sp.textContent=raw;
+    reader.appendChild(sp);
+    tokens.push({raw, n:norm(raw), el:sp});
+  });
+  pos=0; paint(); return true;
+}
+function paint(){
+  tokens.forEach((t,i)=>{
+    t.el.classList.toggle('done',i<pos);
+    t.el.classList.toggle('current',i===pos);
+  });
+  const el=tokens[pos]?.el;
+  if(el){
+    const target = reader.scrollTop + el.getBoundingClientRect().top - reader.getBoundingClientRect().top - reader.clientHeight*.34;
+    reader.scrollTo({top:Math.max(0,target),behavior:'smooth'});
+  }
+}
+function scoreAt(words,startIndex){
+  let score=0, matched=0, j=startIndex;
+  for(let k=0;k<words.length && j<tokens.length;k++){
+    if(!words[k]) continue;
+    let found=-1;
+    for(let look=j;look<Math.min(tokens.length,j+4);look++){
+      if(tokens[look].n===words[k]){found=look;break;}
+    }
+    if(found>=0){ score += 3-(found-j)*.45; matched++; j=found+1; }
+    else score-=.7;
+  }
+  return {score,matched,end:j};
+}
+function follow(transcript){
+  const words=norm(transcript).split(/\s+/).filter(Boolean);
+  if(!words.length) return;
+  heard.textContent='Oyendo: '+transcript;
+  const lo=Math.max(0,pos-12), hi=Math.min(tokens.length-1,pos+45);
+  let best={score:-999,matched:0,end:pos};
+  for(let i=lo;i<=hi;i++){
+    const r=scoreAt(words,i);
+    // favorece ligeramente posiciones próximas a la actual
+    r.score -= Math.abs(i-pos)*.025;
+    if(r.score>best.score) best=r;
+  }
+  const needed = words.length<=2 ? words.length : Math.max(2,Math.ceil(words.length*.45));
+  if(best.matched>=needed && best.score>1.2){
+    // No retroceder por reconocimientos parciales salvo una corrección mínima
+    const newPos=Math.max(pos-2,best.end);
+    if(newPos>pos){ pos=Math.min(newPos,tokens.length-1); paint(); }
+  }
+}
+function setupRecognition(){
+  if(!SR) return;
+  rec=new SR();
+  rec.lang='es-ES'; rec.continuous=true; rec.interimResults=true; rec.maxAlternatives=1;
+  rec.onstart=()=>{listening=true;dot.classList.add('live');state.textContent='Escuchando';toggle.textContent='Parar voz';};
+  rec.onresult=e=>{
+    let txt='';
+    for(let i=e.resultIndex;i<e.results.length;i++) txt+=e.results[i][0].transcript+' ';
+    follow(txt.trim());
+  };
+  rec.onerror=e=>{
+    if(e.error==='not-allowed'){state.textContent='Permiso de micrófono denegado';}
+    else if(e.error!=='aborted'){state.textContent='Micrófono: '+e.error;}
+  };
+  rec.onend=()=>{
+    listening=false;dot.classList.remove('live');toggle.textContent='Iniciar voz';
+    if(!manualStop && view.classList.contains('active')){
+      state.textContent='Reconectando…';
+      setTimeout(()=>{try{rec.start()}catch(e){}},350);
+    }else state.textContent='Preparado';
+  };
+}
+function beginVoice(){
+  if(!SR){alert('Este navegador no ofrece SpeechRecognition. Prueba Chrome o Edge.');return;}
+  if(!rec) setupRecognition();
+  manualStop=false;
+  try{rec.start()}catch(e){}
+}
+function stopVoice(){
+  manualStop=true;
+  if(rec && listening) try{rec.stop()}catch(e){}
+}
+start.onclick=()=>{
+  if(!build()) return;
+  view.classList.add('active');
+  document.body.style.overflow='hidden';
+  beginVoice();
+};
+$('#back').onclick=()=>{stopVoice();view.classList.remove('active');document.body.style.overflow='';};
+toggle.onclick=()=> listening ? stopVoice() : beginVoice();
+$('#plus').onclick=()=>{fontSize=Math.min(88,fontSize+4);document.documentElement.style.setProperty('--fs',fontSize+'px');paint();};
+$('#minus').onclick=()=>{fontSize=Math.max(20,fontSize-4);document.documentElement.style.setProperty('--fs',fontSize+'px');paint();};
+$('#rewind').onclick=()=>{pos=Math.max(0,pos-8);paint();};
+document.addEventListener('keydown',e=>{
+  if(!view.classList.contains('active'))return;
+  if(e.code==='Space' && (e.ctrlKey||e.metaKey)){e.preventDefault(); listening?stopVoice():beginVoice();}
+  if(e.key==='ArrowLeft'){pos=Math.max(0,pos-3);paint();}
+  if(e.key==='ArrowRight'){pos=Math.min(tokens.length-1,pos+3);paint();}
+});
+if(SR) $('#support').textContent='Reconocimiento de voz detectado en este navegador.';
+else {$('#support').textContent='Este navegador no ofrece el reconocimiento necesario para esta V1.';start.disabled=true;}
+</script>
+</body>
+</html>
