@@ -53,7 +53,7 @@ kbd{background:#252f3b;border:1px solid #3b4654;border-radius:5px;padding:2px 5p
 <body>
 <header>
   <div class="brand"><div class="mark">N</div><span class="title">Nexautia · Teleprompter inteligente</span></div>
-  <span class="small">V1.1 · seguimiento tolerante por voz</span>
+  <span class="small">V1.3 · seguimiento por anclajes</span>
 </header>
 
 <main id="editor">
@@ -68,7 +68,7 @@ Lo importante no es utilizar inteligencia artificial porque esté de moda. Lo im
     <button class="primary" id="start">Iniciar teleprompter</button>
     <span class="note" id="support"></span>
   </div>
-  <div class="note">Esta V1.1 mantiene el comportamiento visual de la V1 y solo hace más tolerante el emparejamiento de la voz con el guion. Chrome/Edge suelen ofrecer el mejor soporte. El navegador puede implementar este reconocimiento mediante servicios externos, por lo que esta V1 todavía no garantiza procesamiento 100 % local.</div>
+  <div class="note">Esta V1.3 usa anclajes de palabras: si Chrome omite o confunde alguna, las coincidencias posteriores permiten continuar el seguimiento. Chrome/Edge suelen ofrecer el mejor soporte. El navegador puede implementar este reconocimiento mediante servicios externos, por lo que esta V1 todavía no garantiza procesamiento 100 % local.</div>
 </main>
 
 <section id="promptView">
@@ -125,71 +125,145 @@ function paint(){
     reader.scrollTo({top:Math.max(0,target),behavior:'smooth'});
   }
 }
-function similarWord(a,b){
+// V1.3 — seguimiento por anclajes.
+// Chrome puede omitir o confundir palabras. No exigimos una frase perfecta:
+// buscamos anclajes reconocibles, en orden, y usamos los posteriores para
+// confirmar que el lector ha seguido avanzando.
+
+function wordSimilarity(a,b){
   if(!a || !b) return 0;
   if(a===b) return 1;
+
+  // Tolerancia moderada para pequeñas diferencias del reconocimiento.
   if(a.length>=5 && b.length>=5){
     if(a.startsWith(b) || b.startsWith(a)) return .88;
-    if(Math.abs(a.length-b.length)<=1){
-      let i=0,j=0,d=0;
-      while(i<a.length && j<b.length){
-        if(a[i]===b[j]){i++;j++;continue;}
-        if(++d>1) return 0;
-        if(a.length>b.length)i++;
-        else if(b.length>a.length)j++;
-        else{i++;j++;}
+
+    // Levenshtein acotado: solo nos interesan errores pequeños.
+    const m=a.length,n=b.length;
+    if(Math.abs(m-n)>2) return 0;
+    const prev=Array.from({length:n+1},(_,j)=>j);
+    for(let i=1;i<=m;i++){
+      const cur=[i];
+      let rowMin=cur[0];
+      for(let j=1;j<=n;j++){
+        cur[j]=Math.min(
+          prev[j]+1,
+          cur[j-1]+1,
+          prev[j-1]+(a[i-1]===b[j-1]?0:1)
+        );
+        rowMin=Math.min(rowMin,cur[j]);
       }
-      d+=(a.length-i)+(b.length-j);
-      if(d<=1) return .78;
+      if(rowMin>2) return 0;
+      for(let j=0;j<=n;j++) prev[j]=cur[j];
     }
+    const d=prev[n];
+    if(d===1) return .82;
+    if(d===2 && Math.max(m,n)>=7) return .68;
   }
   return 0;
 }
-function scoreAt(words,startIndex){
-  let score=0,matched=0,exact=0,j=startIndex,last=startIndex;
-  for(let k=0;k<words.length && j<tokens.length;k++){
-    if(!words[k]) continue;
-    let found=-1,quality=0;
-    for(let look=j;look<Math.min(tokens.length,j+7);look++){
-      const q=similarWord(tokens[look].n,words[k]);
-      if(q>quality){found=look;quality=q;if(q===1)break;}
+
+function alignAnchors(words,startIndex){
+  let script=startIndex;
+  let matched=0, exact=0, score=0;
+  let first=-1,last=-1;
+  let consecutive=0,bestRun=0;
+
+  for(let k=0;k<words.length && script<tokens.length;k++){
+    let best=-1,bestQ=0;
+
+    // Permitimos que Chrome se coma varias palabras del guion.
+    const limit=Math.min(tokens.length,script+9);
+    for(let j=script;j<limit;j++){
+      const q=wordSimilarity(tokens[j].n,words[k]);
+      if(q>bestQ){
+        bestQ=q; best=j;
+        if(q===1) break;
+      }
     }
-    if(found>=0 && quality>=.75){
-      const gap=found-j;
-      score+=(quality===1?3.2:2.35)-gap*.32;
-      matched++; if(quality===1) exact++;
-      last=found;j=found+1;
-    }else score-=.55;
+
+    if(best>=0 && bestQ>=.68){
+      if(first<0) first=best;
+      const gap=best-script;
+
+      matched++;
+      if(bestQ===1) exact++;
+
+      // Premia coincidencias exactas y secuencias; penaliza huecos, pero no
+      // bloquea el seguimiento por una palabra perdida.
+      score += (bestQ===1 ? 3.0 : 2.0) - Math.min(gap,6)*.22;
+      consecutive = gap<=2 ? consecutive+1 : 1;
+      bestRun=Math.max(bestRun,consecutive);
+
+      last=best;
+      script=best+1;
+    }else{
+      // Una palabra que Chrome no entendió no invalida lo ya encontrado.
+      score-=.35;
+      consecutive=0;
+    }
   }
-  return {score,matched,exact,end:last+1,start:startIndex};
+
+  return {start:startIndex,first,last,end:last>=0?last+1:startIndex,
+          matched,exact,bestRun,score};
 }
-let pendingCandidate=null;
+
+let lastConfirmedPos=0;
+
 function follow(transcript){
   const words=norm(transcript).split(/\s+/).filter(Boolean);
   if(!words.length) return;
   heard.textContent='Oyendo: '+transcript;
-  const lo=Math.max(0,pos-4),hi=Math.min(tokens.length-1,pos+75);
-  let best={score:-999,matched:0,exact:0,end:pos,start:pos};
+
+  // Normalmente buscamos cerca de la posición actual. Hacia delante damos
+  // bastante margen para que pueda reengancharse tras varios errores.
+  const lo=Math.max(0,pos-8);
+  const hi=Math.min(tokens.length-1,pos+90);
+
+  let best=null;
   for(let i=lo;i<=hi;i++){
-    const r=scoreAt(words,i);
-    r.score-=Math.max(0,i-pos)*.018;
-    if(r.score>best.score) best=r;
+    const r=alignAnchors(words,i);
+
+    // Un candidato muy lejano necesita más evidencia que uno cercano.
+    const distance=Math.max(0,i-pos);
+    r.adjusted=r.score-distance*.025;
+
+    if(!best || r.adjusted>best.adjusted) best=r;
   }
-  const needed=words.length<=2?words.length:Math.max(2,Math.ceil(words.length*.38));
-  const strong=best.matched>=needed && best.score>1.35 && (best.exact>=1 || best.matched>=3);
-  if(!strong) return;
+
+  if(!best || best.last<0) return;
+
+  const n=words.length;
+
+  // Evidencia suficiente: dos buenos anclajes ya pueden mantener el avance.
+  // Para transcripciones largas exigimos algo más, pero nunca una mayoría.
+  let enough=false;
+  if(n===1){
+    enough = best.exact===1 && best.first>=pos && best.first<=pos+8;
+  }else if(n===2){
+    enough = best.matched===2 && best.score>=4.0;
+  }else{
+    enough =
+      (best.matched>=2 && best.exact>=1 && best.bestRun>=2) ||
+      (best.matched>=3 && best.exact>=2) ||
+      (best.matched>=4);
+  }
+
+  if(!enough) return;
+
   const candidate=Math.min(best.end,tokens.length-1);
+
+  // El seguimiento normal es monotónico: nunca retrocedemos porque Chrome
+  // cambie una transcripción parcial.
+  if(candidate<=pos) return;
+
+  // Protección contra falsos saltos a una frase parecida muy lejana.
   const jump=candidate-pos;
-  if(jump<=14){
-    if(candidate>pos){pos=candidate;paint();}
-    pendingCandidate=null;
-    return;
-  }
-  if(pendingCandidate && Math.abs(pendingCandidate.pos-candidate)<=5){
-    const confirmed=Math.max(pendingCandidate.pos,candidate);
-    if(confirmed>pos){pos=confirmed;paint();}
-    pendingCandidate=null;
-  }else pendingCandidate={pos:candidate};
+  if(jump>28 && best.matched<4 && best.bestRun<3) return;
+
+  pos=candidate;
+  lastConfirmedPos=pos;
+  paint();
 }
 function setupRecognition(){
   if(!SR) return;
