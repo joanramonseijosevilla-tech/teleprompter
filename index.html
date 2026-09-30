@@ -38,7 +38,7 @@ textarea:focus{border-color:var(--accent)}
 .readerWrap{position:relative;flex:1;overflow:hidden}
 .guide{position:absolute;left:0;right:0;top:34%;height:1.75em;background:#67d7c40b;border-top:1px solid #67d7c455;border-bottom:1px solid #67d7c455;pointer-events:none;z-index:2}
 .guide:before{content:"";position:absolute;left:8px;top:50%;width:8px;height:8px;border-left:2px solid var(--accent);border-bottom:2px solid var(--accent);transform:translateY(-50%) rotate(45deg)}
-#reader{height:100%;overflow:auto;scroll-behavior:smooth;padding:34vh 8vw 55vh;font-size:var(--fs);line-height:1.55;font-weight:600}
+#reader{height:100%;overflow:auto;padding:34vh 8vw 55vh;font-size:var(--fs);line-height:1.55;font-weight:600}
 .word{color:#8793a1;transition:color .12s,background .12s}
 .word.done{color:#c8d0d9}
 .word.current{color:#fff;background:#67d7c426;border-radius:.18em;box-shadow:0 0 0 .08em #67d7c422}
@@ -53,7 +53,7 @@ kbd{background:#252f3b;border:1px solid #3b4654;border-radius:5px;padding:2px 5p
 <body>
 <header>
   <div class="brand"><div class="mark">N</div><span class="title">Nexautia · Teleprompter inteligente</span></div>
-  <span class="small">V1 · prueba de seguimiento por voz</span>
+  <span class="small">V1.2 · seguimiento fluido por voz</span>
 </header>
 
 <main id="editor">
@@ -68,7 +68,7 @@ Lo importante no es utilizar inteligencia artificial porque esté de moda. Lo im
     <button class="primary" id="start">Iniciar teleprompter</button>
     <span class="note" id="support"></span>
   </div>
-  <div class="note">Esta V1 usa el reconocimiento de voz disponible en el navegador para validar el funcionamiento. Chrome/Edge suelen ofrecer el mejor soporte. El navegador puede implementar este reconocimiento mediante servicios externos, por lo que esta V1 todavía no garantiza procesamiento 100 % local.</div>
+  <div class="note">Esta V1.2 mantiene el reconocimiento de voz disponible en el navegador y añade seguimiento visual continuo, estimación del ritmo y parada al detectar silencio. Chrome/Edge suelen ofrecer el mejor soporte. El navegador puede implementar este reconocimiento mediante servicios externos, por lo que esta V1 todavía no garantiza procesamiento 100 % local.</div>
 </main>
 
 <section id="promptView">
@@ -94,6 +94,8 @@ const $ = s => document.querySelector(s);
 const script = $('#script'), reader=$('#reader'), view=$('#promptView');
 const start=$('#start'), toggle=$('#toggle'), dot=$('#dot'), state=$('#state'), heard=$('#heard');
 let rec=null, listening=false, tokens=[], pos=0, fontSize=42, manualStop=false;
+let visualPos=0, targetPos=0, lastVoiceAt=0, lastAnchorAt=0, lastAnchorPos=0;
+let wordsPerSecond=2.2, animId=0;
 
 function norm(s){
   return s.toLocaleLowerCase('es-ES')
@@ -112,19 +114,46 @@ function build(){
     reader.appendChild(sp);
     tokens.push({raw, n:norm(raw), el:sp});
   });
-  pos=0; paint(); return true;
+  pos=0; visualPos=0; targetPos=0; lastVoiceAt=0; lastAnchorAt=0; lastAnchorPos=0; paint(); reader.scrollTop=0; return true;
 }
 function paint(){
+  const p=Math.max(0,Math.min(tokens.length-1,Math.round(visualPos)));
   tokens.forEach((t,i)=>{
-    t.el.classList.toggle('done',i<pos);
-    t.el.classList.toggle('current',i===pos);
+    t.el.classList.toggle('done',i<p);
+    t.el.classList.toggle('current',i===p);
   });
-  const el=tokens[pos]?.el;
-  if(el){
-    const target = reader.scrollTop + el.getBoundingClientRect().top - reader.getBoundingClientRect().top - reader.clientHeight*.34;
-    reader.scrollTo({top:Math.max(0,target),behavior:'smooth'});
-  }
 }
+
+function scrollToVisual(){
+  const p=Math.max(0,Math.min(tokens.length-1,Math.round(visualPos)));
+  const el=tokens[p]?.el;
+  if(!el) return;
+  const target=reader.scrollTop+el.getBoundingClientRect().top-reader.getBoundingClientRect().top-reader.clientHeight*.34;
+  reader.scrollTop+=(Math.max(0,target)-reader.scrollTop)*0.18;
+}
+
+function animate(){
+  cancelAnimationFrame(animId);
+  let prev=performance.now();
+  const tick=(now)=>{
+    const dt=Math.min(.05,(now-prev)/1000); prev=now;
+    const voiceFresh=(Date.now()-lastVoiceAt)<900;
+    let desired=targetPos;
+    if(voiceFresh && lastAnchorAt){
+      const ahead=Math.min(3.5,((Date.now()-lastAnchorAt)/1000)*wordsPerSecond);
+      desired=Math.max(desired,lastAnchorPos+ahead);
+    }
+    const diff=desired-visualPos;
+    if(Math.abs(diff)>.01){
+      const maxStep=Math.max(.04,wordsPerSecond*dt*1.35);
+      visualPos+=Math.sign(diff)*Math.min(Math.abs(diff),maxStep);
+      paint(); scrollToVisual();
+    }
+    animId=requestAnimationFrame(tick);
+  };
+  animId=requestAnimationFrame(tick);
+}
+
 function scoreAt(words,startIndex){
   let score=0, matched=0, j=startIndex;
   for(let k=0;k<words.length && j<tokens.length;k++){
@@ -152,16 +181,26 @@ function follow(transcript){
   }
   const needed = words.length<=2 ? words.length : Math.max(2,Math.ceil(words.length*.45));
   if(best.matched>=needed && best.score>1.2){
-    // No retroceder por reconocimientos parciales salvo una corrección mínima
-    const newPos=Math.max(pos-2,best.end);
-    if(newPos>pos){ pos=Math.min(newPos,tokens.length-1); paint(); }
+    const newPos=Math.min(Math.max(pos,best.end),tokens.length-1);
+    const now=Date.now(); lastVoiceAt=now;
+    if(newPos>pos){
+      if(lastAnchorAt && newPos>lastAnchorPos){
+        const secs=(now-lastAnchorAt)/1000;
+        if(secs>.18){
+          const measured=(newPos-lastAnchorPos)/secs;
+          if(measured>.5 && measured<6) wordsPerSecond=wordsPerSecond*.72+measured*.28;
+        }
+      }
+      pos=newPos; targetPos=newPos; lastAnchorPos=newPos; lastAnchorAt=now;
+    }
   }
 }
 function setupRecognition(){
   if(!SR) return;
   rec=new SR();
   rec.lang='es-ES'; rec.continuous=true; rec.interimResults=true; rec.maxAlternatives=1;
-  rec.onstart=()=>{listening=true;dot.classList.add('live');state.textContent='Escuchando';toggle.textContent='Parar voz';};
+  rec.onstart=()=>{listening=true;dot.classList.add('live');state.textContent='Escuchando';toggle.textContent='Parar voz';
+    lastVoiceAt=Date.now(); lastAnchorAt=Date.now(); lastAnchorPos=pos; targetPos=pos; animate();};
   rec.onresult=e=>{
     let txt='';
     for(let i=e.resultIndex;i<e.results.length;i++) txt+=e.results[i][0].transcript+' ';
@@ -187,7 +226,7 @@ function beginVoice(){
 }
 function stopVoice(){
   manualStop=true;
-  if(rec && listening) try{rec.stop()}catch(e){}
+  cancelAnimationFrame(animId); if(rec && listening) try{rec.stop()}catch(e){}
 }
 start.onclick=()=>{
   if(!build()) return;
@@ -199,7 +238,7 @@ $('#back').onclick=()=>{stopVoice();view.classList.remove('active');document.bod
 toggle.onclick=()=> listening ? stopVoice() : beginVoice();
 $('#plus').onclick=()=>{fontSize=Math.min(88,fontSize+4);document.documentElement.style.setProperty('--fs',fontSize+'px');paint();};
 $('#minus').onclick=()=>{fontSize=Math.max(20,fontSize-4);document.documentElement.style.setProperty('--fs',fontSize+'px');paint();};
-$('#rewind').onclick=()=>{pos=Math.max(0,pos-8);paint();};
+$('#rewind').onclick=()=>{pos=Math.max(0,pos-8);visualPos=targetPos=pos;lastAnchorPos=pos;lastAnchorAt=Date.now();paint();scrollToVisual();};
 document.addEventListener('keydown',e=>{
   if(!view.classList.contains('active'))return;
   if(e.code==='Space' && (e.ctrlKey||e.metaKey)){e.preventDefault(); listening?stopVoice():beginVoice();}
