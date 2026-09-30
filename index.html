@@ -53,7 +53,7 @@ kbd{background:#252f3b;border:1px solid #3b4654;border-radius:5px;padding:2px 5p
 <body>
 <header>
   <div class="brand"><div class="mark">N</div><span class="title">Nexautia · Teleprompter inteligente</span></div>
-  <span class="small">V1.4 · contexto + movimiento suave</span>
+  <span class="small">V1.5 · anclajes con confirmación</span>
 </header>
 
 <main id="editor">
@@ -68,7 +68,7 @@ Lo importante no es utilizar inteligencia artificial porque esté de moda. Lo im
     <button class="primary" id="start">Iniciar teleprompter</button>
     <span class="note" id="support"></span>
   </div>
-  <div class="note">Esta V1.4 separa la localización por contexto del movimiento visual: la voz fija el destino y la pantalla se desplaza suavemente hasta él. Chrome/Edge suelen ofrecer el mejor soporte. El navegador puede implementar este reconocimiento mediante servicios externos, por lo que esta V1 todavía no garantiza procesamiento 100 % local.</div>
+  <div class="note">Esta V1.5 tolera palabras mal reconocidas, pero exige una segunda confirmación antes de aceptar saltos grandes. Chrome/Edge suelen ofrecer el mejor soporte. El navegador puede implementar este reconocimiento mediante servicios externos, por lo que esta V1 todavía no garantiza procesamiento 100 % local.</div>
 </main>
 
 <section id="promptView">
@@ -114,7 +114,7 @@ function build(){
   });
   pos=0; paint(); return true;
 }
-function paint(doScroll=true){
+function paint(){
   tokens.forEach((t,i)=>{
     t.el.classList.toggle('done',i<pos);
     t.el.classList.toggle('current',i===pos);
@@ -125,26 +125,23 @@ function paint(doScroll=true){
     reader.scrollTo({top:Math.max(0,target),behavior:'smooth'});
   }
 }
-// V1.4 — dos capas independientes:
-// 1) LOCALIZACIÓN: determina dónde está leyendo el usuario.
-// 2) MOVIMIENTO: lleva suavemente la vista hasta esa posición.
-// Nunca avanzamos por velocidad estimada: sin voz confirmada, no hay avance.
+// V1.5 — anclajes tolerantes + confirmación de saltos.
+// Objetivo: permitir errores de Chrome sin quedarse clavado,
+// pero impedir que una coincidencia dudosa mande el texto demasiado adelante.
 
-let targetPos=0;
-let displayPos=0;
-let rafId=0;
+let pendingJump=null;
 
 function sim(a,b){
   if(!a || !b) return 0;
   if(a===b) return 1;
   if(a.length<4 || b.length<4) return 0;
   if(a.startsWith(b) || b.startsWith(a)) return .86;
-
   if(Math.abs(a.length-b.length)>1) return 0;
+
   let i=0,j=0,d=0;
   while(i<a.length && j<b.length){
     if(a[i]===b[j]){i++;j++;continue;}
-    if(++d>1)return 0;
+    if(++d>1) return 0;
     if(a.length>b.length)i++;
     else if(b.length>a.length)j++;
     else{i++;j++;}
@@ -153,114 +150,92 @@ function sim(a,b){
   return d<=1 ? .76 : 0;
 }
 
-function alignContext(words,start){
-  let si=start, matches=0, exact=0, score=0, last=start-1;
-  let run=0,bestRun=0;
+function align(words,start){
+  let si=start,matched=0,exact=0,last=start-1,score=0,run=0,bestRun=0;
 
   for(let wi=0;wi<words.length && si<tokens.length;wi++){
     let best=-1,bq=0;
-    // Chrome puede omitir palabras: buscamos el siguiente anclaje algo más lejos.
-    for(let j=si;j<Math.min(tokens.length,si+10);j++){
+
+    // Toleramos que Chrome omita algunas palabras, pero sin abrir
+    // una ventana enorme que facilite falsos saltos.
+    for(let j=si;j<Math.min(tokens.length,si+8);j++){
       const q=sim(tokens[j].n,words[wi]);
-      if(q>bq){bq=q;best=j;if(q===1)break;}
+      if(q>bq){best=j;bq=q;if(q===1)break;}
     }
+
     if(best>=0 && bq>=.75){
       const gap=best-si;
-      matches++;
-      if(bq===1)exact++;
-      run = gap<=2 ? run+1 : 1;
+      matched++;
+      if(bq===1) exact++;
+      run=gap<=2 ? run+1 : 1;
       bestRun=Math.max(bestRun,run);
-      score += (bq===1?3.2:2.15) - Math.min(gap,7)*.20;
+      score+=(bq===1?3.1:2.05)-Math.min(gap,6)*.24;
       last=best;
       si=best+1;
     }else{
-      score-=.28;
+      score-=.32;
       run=0;
     }
   }
-  return {start,end:last+1,last,matches,exact,bestRun,score};
+
+  return {start,end:last+1,last,matched,exact,bestRun,score};
 }
 
-function bestAlignment(words,from,to){
+function bestMatch(words,from,to){
   let best=null;
   for(let i=from;i<=to;i++){
-    const r=alignContext(words,i);
+    const r=align(words,i);
     if(!best || r.score>best.score) best=r;
   }
   return best;
 }
 
-function confidence(r,n){
+function credible(r,n){
   if(!r || r.last<0) return false;
-  if(n<=2) return r.matches===n && r.exact>=1;
+  if(n===1) return r.exact===1;
+  if(n===2) return r.matched===2 && r.exact>=1;
   return (
-    (r.bestRun>=3 && r.matches>=3) ||
-    (r.matches>=4 && r.exact>=2) ||
-    (r.matches>=5)
+    (r.bestRun>=2 && r.matched>=3 && r.exact>=1) ||
+    (r.matched>=4 && r.exact>=2)
   );
 }
 
-function locate(words){
-  // Primero intentamos seguimiento local: rápido y estable.
-  const localFrom=Math.max(0,pos-10);
-  const localTo=Math.min(tokens.length-1,pos+70);
-  let best=bestAlignment(words,localFrom,localTo);
+function acceptPosition(candidate){
+  candidate=Math.min(candidate,tokens.length-1);
+  if(candidate<=pos) return;
 
-  if(confidence(best,words.length)){
-    return best;
+  const jump=candidate-pos;
+
+  // Avance pequeño/normal: se acepta inmediatamente.
+  if(jump<=10){
+    pos=candidate;
+    pendingJump=null;
+    paint();
+    return;
   }
 
-  // Si la posición local ya no explica lo que Chrome oye, resincronizamos
-  // globalmente. Para evitar falsas coincidencias usamos solo contexto reciente
-  // y exigimos más evidencia.
-  if(words.length>=4){
-    const global=bestAlignment(words,0,tokens.length-1);
-    if(global && (
-      global.bestRun>=4 ||
-      (global.matches>=5 && global.exact>=3) ||
-      global.matches>=6
-    )){
-      return global;
+  // Avance grande: no se acepta a la primera.
+  // Guardamos la propuesta y esperamos otro resultado de Chrome.
+  if(!pendingJump){
+    pendingJump={pos:candidate,hits:1};
+    return;
+  }
+
+  // Segunda lectura compatible: confirmamos, pero evitamos saltar hasta
+  // el extremo más optimista de ambas propuestas.
+  if(Math.abs(pendingJump.pos-candidate)<=7){
+    pendingJump.hits++;
+    if(pendingJump.hits>=2){
+      const confirmed=Math.min(pendingJump.pos,candidate);
+      pos=confirmed;
+      pendingJump=null;
+      paint();
     }
-  }
-  return null;
-}
-
-function scrollToDisplay(){
-  rafId=0;
-  if(!tokens.length) return;
-
-  // displayPos solo persigue una posición que la voz ya ha confirmado.
-  const delta=targetPos-displayPos;
-  if(Math.abs(delta)<.08){
-    displayPos=targetPos;
   }else{
-    // Corrección suave; los desfases grandes se recuperan más deprisa.
-    const factor=Math.abs(delta)>15 ? .22 : (Math.abs(delta)>6 ? .16 : .11);
-    displayPos += delta*factor;
+    // La nueva propuesta contradice la anterior: sustituimos la hipótesis,
+    // no movemos todavía el teleprompter.
+    pendingJump={pos:candidate,hits:1};
   }
-
-  const idx=Math.max(0,Math.min(tokens.length-1,Math.round(displayPos)));
-  const el=tokens[idx]?.el;
-  if(el){
-    const box=el.getBoundingClientRect();
-    const current=box.top+box.height/2;
-    const desired=innerHeight*.34;
-    window.scrollBy(0,(current-desired)*.18);
-  }
-
-  if(Math.abs(targetPos-displayPos)>=.08){
-    rafId=requestAnimationFrame(scrollToDisplay);
-  }
-}
-
-function setTarget(newPos){
-  newPos=Math.max(pos,Math.min(newPos,tokens.length-1));
-  if(newPos<=pos) return;
-  pos=newPos;               // posición lógica confirmada por la voz
-  targetPos=pos;            // destino visual
-  paint(false);             // actualiza resaltado sin imponer el scroll de V1
-  if(!rafId) rafId=requestAnimationFrame(scrollToDisplay);
 }
 
 function follow(transcript){
@@ -268,20 +243,30 @@ function follow(transcript){
   if(!all.length) return;
   heard.textContent='Oyendo: '+transcript;
 
-  // El final de la transcripción es lo más útil para saber dónde estamos ahora.
-  // Conservamos suficiente contexto para distinguir frases parecidas.
-  const words=all.slice(-14);
-  const found=locate(words);
-  if(!found) return;
+  // Contexto reciente: suficiente para localizar, pero no tanto como para
+  // convertir una transcripción acumulada en un salto excesivo.
+  const words=all.slice(-10);
 
-  const candidate=Math.min(found.end,tokens.length-1);
-  if(candidate<=pos) return;
+  // Seguimiento local primero.
+  const from=Math.max(0,pos-6);
+  const to=Math.min(tokens.length-1,pos+45);
+  let best=bestMatch(words,from,to);
 
-  // Un salto grande requiere evidencia contextual fuerte.
-  const jump=candidate-pos;
-  if(jump>35 && found.bestRun<4 && found.matches<6) return;
+  if(credible(best,words.length)){
+    acceptPosition(best.end);
+    return;
+  }
 
-  setTarget(candidate);
+  // Recuperación más amplia solo con evidencia fuerte.
+  if(words.length>=5){
+    const wider=bestMatch(words,0,tokens.length-1);
+    if(wider && (
+      wider.bestRun>=4 ||
+      (wider.matched>=5 && wider.exact>=3)
+    )){
+      acceptPosition(wider.end);
+    }
+  }
 }
 function setupRecognition(){
   if(!SR) return;
